@@ -1,0 +1,6 @@
+[submodule "hasktorch"]
+	path = hasktorch
+	url = git@github.com:hasktorch/hasktorch.git
+[submodule "spconv"]
+	path = spconv
+	url = git@github.com:traveller59/spconv.git
