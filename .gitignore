@@ -1,3 +1,5 @@
-Setup.hs
+dist-newstyle/
+tmp/
+.vscode/
 
 *.code-workspace
