@@ -1,5 +1,8 @@
 dist-newstyle/
+*.local
+
 tmp/
+
 .vscode/
 
 *.code-workspace

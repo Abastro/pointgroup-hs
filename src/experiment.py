@@ -1,4 +1,4 @@
-import torch
-import spconv
+# import torch
+# import spconv
 
-torch.jit.script(spconv.())
+# torch.jit.script(spconv.())

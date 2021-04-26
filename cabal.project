@@ -1,8 +1,8 @@
 packages:
     -- Hasktorch
-    --hasktorch/codegen/*.cabal
-    --hasktorch/libtorch-ffi/*.cabal
-    --hasktorch/libtorch-ffi-helper/*.cabal
-    --hasktorch/hasktorch/*.cabal
+    hasktorch/codegen/*.cabal
+    hasktorch/libtorch-ffi/*.cabal
+    hasktorch/libtorch-ffi-helper/*.cabal
+    hasktorch/hasktorch/*.cabal
     -- Main project
     ./*.cabal
