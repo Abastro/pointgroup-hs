@@ -15,17 +15,36 @@ executable pointgroup-hs
   main-is:             Main.hs
   other-modules:
       Util
+      Preprocess
       Models
       PointNet
       PointGroup
   -- other-extensions:
   build-depends:
       base >=4.14 && <4.15
+    , containers
+    , vector == 0.12.*
+    , bytestring
+    , bytestring-to-vector == 0.3.*
+    , async
+    , async-pool == 0.9.*
+    , derive-storable == 0.3.*
+    , filepath == 1.4.*
+    , directory == 1.3.*
+    , aeson == 1.5.*
+    , ply-loader == 0.5.*
+    , accelerate == 1.3.*
+    --, accelerate-llvm-ptx == 1.3.*
     , hasktorch == 0.2.*
   hs-source-dirs:      app
+  ghc-options:  -threaded -with-rtsopts=-N
   default-language:    Haskell2010
   default-extensions:
       FlexibleInstances
     , FlexibleContexts
     , MultiParamTypeClasses
+    , TypeApplications
+    , DeriveFunctor
+    , DeriveGeneric
+    , TupleSections
     , RecordWildCards

@@ -2,6 +2,7 @@ dist-newstyle/
 *.local
 
 tmp/
+dataset/
 
 .vscode/
 

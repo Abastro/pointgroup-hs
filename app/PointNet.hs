@@ -1,30 +1,27 @@
 module PointNet where
 
+import GHC.Generics ( Generic )
 import Data.Foldable ( foldl' )
 import Data.Function ((&))
 import Torch as T
 import Util
 
-data PNSpec = PNSpec{
-  nDim :: Int
-  , nFeature :: Int
-}
+data PNSpec = PNSpec Int Int -- ^ PNSpec nDim nFeature
 
 -- PointNet per-point feature implementation
 data PointNet = PointNet{
   mkFeat :: Linear, mkFeatBn :: BatchNorm
   , glmlp :: MLP
   , ptmlp :: MLP
-}
-
+} deriving Generic
+instance Parameterized PointNet
 instance Randomizable PNSpec PointNet where
-  sample PNSpec{..} = PointNet
-    -- TODO Use linear
+  sample (PNSpec nDim nFeature) = PointNet
     <$> sample (LinearSpec nDim 64) <*> sample (BatchNormSpec 64)
     <*> sample (MLPSpec [64, 128, 1024])
     <*> sample (MLPSpec [1088, 512, 256, 128, nFeature])
 
--- TODO implement cluster-wise.
+-- TODO implement irregular batch-wise.
 --      relevant part: "global feature max pooling" & "pos/feature transform"
 -- | PointNet. [batch, nP, dim] -> [batch, nP, nFeature]
 pointNet :: TrainSet -> PointNet -> Tensor -> Tensor
@@ -45,4 +42,4 @@ pointNet ts PointNet{..} inp = outp where
   outp = applyMLP ts ptmlp pPoint
 
 instance Backbone PointNet where
-  backbone = pointNet
+  backbone ts pn = fmap $ pointNet ts pn
