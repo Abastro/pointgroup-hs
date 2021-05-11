@@ -5,7 +5,7 @@ import GHC.Generics (Generic)
 import Torch as T
 import Util
 
--- TODO Batches does not have regular-shaped tensors
+-- TODO Write with COO
 
 -- * Conventions
 --

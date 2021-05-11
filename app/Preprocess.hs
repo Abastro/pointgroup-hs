@@ -72,6 +72,29 @@ readPVFromFile p = byteStringToVector <$> B.readFile p
 data DataContractException a = DataNotEqual String a a deriving (Show, Typeable)
 instance (Show a, Typeable a) => Exception (DataContractException a)
 
+
+-- | Links the scannet dataset for use
+--
+-- [@srcP@]: parent path of the dataset
+-- [@specName@]: name of file which specifies the scenes
+-- [@scanName@]: name of scan directory
+-- [@tarP@]: name of target directory to link
+-- [@split@]: name of the split directory in the target
+linkScannet :: FilePath -> String -> String -> FilePath -> String -> IO ()
+linkScannet srcP specName scanName tarP split = do
+  printf "Symlinking in %s for split %s..\n" tarP split
+  scenes <- lines <$> readFile (srcP </> specName)
+  traverse_ linkScene scenes
+  where
+    linkScene scName = do
+      scSrc <- canonicalizePath $ srcP </> scanName </> scName
+      let scTar = tarP </> split
+      lists <- listDirectory scSrc
+      let link fn = do
+            removeFile (scTar </> fn)
+            createFileLink (scSrc </> fn) (scTar </> fn)
+      traverse_ link lists
+
 -- | Process the scannet dataset
 --
 -- [@path@]: parent path of the dataset
