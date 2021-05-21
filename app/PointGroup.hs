@@ -9,15 +9,28 @@ data PGInput = PGInput{
   pgColor :: Tensor -- ^ colors [N, nDim]
   , pgPos :: Tensor -- ^ positions [N, nDim]
 }
+catInputs :: [PGInput] -> PGInput
+catInputs l = PGInput{
+  pgColor = cat (Dim 0) $ pgColor <$> l
+  , pgPos = cat (Dim 0) $ pgPos <$> l
+}
+
 data PGGroundTruth = PGGroundTruth{
   gtSem :: Tensor -- ^ semantic labels [N]
   , gtIns :: Instances  -- ^ instances
 }
+catGTs :: [PGGroundTruth] -> PGGroundTruth
+catGTs l = PGGroundTruth{
+  gtSem = cat (Dim 0) $ gtSem <$> l
+  , gtIns = undefined -- TODO
+}
+
+
 -- | PointGroup Losses
 data PGLoss = PGLoss {
-  lossSem :: Tensor
-  , lossOff :: (Tensor, Tensor) -- ^ (loss_reg, loss_dir)
-  , lossScore :: Tensor
+  lossSem :: Loss
+  , lossOff :: (Loss, Loss) -- ^ (loss_reg, loss_dir)
+  , lossScore :: Loss
 }
 
 data PGCfg = PGCfg {
@@ -50,7 +63,8 @@ instance (BackSpec s, Randomizable s n) => Randomizable (PGSpec s n) (PointGroup
     <*> return pgSpCfg
     <*> sample (ScSpec nDim nFeature scBackSpec scFeature)
 
--- | PointGroup. pass Nothing for Ground Truth for tests
+-- TODO Instead of Maybe, use a containment (Proxy or Identity) streamlining process
+-- | PointGroup. Pass Nothing for Ground Truth for tests
 pointGroup :: Backbone n => TrainSet -> PointGroup n
   -> Irreg PGInput -> Maybe PGGroundTruth -> (Instances, Maybe PGLoss)
 pointGroup ts PointGroup{..} pInput gt = (res, losses) where
@@ -79,8 +93,8 @@ pointGroup ts PointGroup{..} pInput gt = (res, losses) where
   -- Clustering
   clusterWith = cluster (clusterCfg pgCfg) . fmap (predSem, )
   insP = clusterWith pos
-  insQ = clusterWith $ add predOff <$> pos
-  ins = undefined -- TODO Add two instances
+  insQ = clusterWith $ (predOff +) <$> pos
+  ins = undefined -- TODO Union two instances
 
   -- ScoreNet
   score = insScore ts scoreNet ins (irregData pos) (irregData ptFeat)

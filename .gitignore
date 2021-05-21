@@ -1,6 +1,7 @@
 dist-newstyle/
 *.local
 
+log/
 tmp/
 dataset/
 

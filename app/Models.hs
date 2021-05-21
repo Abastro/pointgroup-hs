@@ -5,7 +5,7 @@ import GHC.Generics (Generic)
 import Torch as T
 import Util
 
--- TODO Write with COO
+-- TODO Perhaps Use COO? Possibly slower though
 
 -- * Conventions
 --
@@ -22,7 +22,9 @@ data Instances = Instances{
   , insBegin :: Irreg Tensor -- ^ Instance begin offset, pad last, [sum nIns + 1]
   , insOfPt :: Irreg Tensor -- ^ Instance of a point, [N]
 }
--- TODO instance construction from (insPts, insBegin)
+
+mkInstances :: Tensor -> Irreg Tensor -> Instances
+mkInstances insPts insBegin = undefined -- TODO
 insLOffset :: Instances -> Irreg Tensor
 insLOffset Instances{..} = slice 0 0 (nIns-1) 1 <$> insBegin where nIns = size 0 (irregData insBegin)
 insROffset :: Instances -> Irreg Tensor
@@ -64,6 +66,7 @@ instance Randomizable OffSpec Offsets where
 offsetPred :: TrainSet -> Offsets -> Tensor -> Tensor
 offsetPred ts Offsets{..} = applyMLP ts offMlp
 
+-- TODO This centroid could be inefficient
 -- | Centroid of instance. p[N, nDim] -> c[N, nDim]
 centroid :: Instances -> Tensor -> Tensor
 centroid ins p = ind (irregData $ insOfPt ins) insCen where
@@ -72,9 +75,9 @@ centroid ins p = ind (irregData $ insOfPt ins) insCen where
   sums = cat (Dim 1) [zerosLike (slice 0 0 1 1 ipos), cumsum 0 Float ipos]
 
   insLeft = irregData $ insLOffset ins; insRight = irregData $ insROffset ins
-  insS = ind insRight sums `T.sub` ind insLeft sums
-  insN = insRight `T.sub` insLeft
-  insCen = insS `T.div` insN
+  insS = ind insRight sums - ind insLeft sums
+  insN = insRight - insLeft
+  insCen = insS / insN
 
 -- | L1 Regression Loss.
 --
@@ -97,8 +100,8 @@ dirLoss :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
 dirLoss m o c p = out where
   r = p `sub` c -- Negation of c-p
   s = normDim 2.0 (Dim 1) RemoveDim o `mul` normDim 2.0 (Dim 1) RemoveDim r
-  cosL = sumDim (Dim 1) RemoveDim Float (o `mul` r) `T.div` s
-  out = m `mul` cosL
+  cosL = sumDim (Dim 1) RemoveDim Float (o `mul` r) / s
+  out = m * cosL
     & sumDim (Dim 0) RemoveDim Float
     & divScalar (toDouble $ sumAll m)
 

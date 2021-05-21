@@ -1,8 +1,13 @@
+source-repository-package
+    type: git
+    location: git://github.com/hasktorch/hasktorch.git
+    tag: 23b2931e50154ef288fc2d7965660e78ff514b08
+    subdir:
+        codegen/
+        libtorch-ffi/
+        libtorch-ffi-helper/
+        hasktorch/
+        examples/
+
 packages:
-    -- Hasktorch
-    hasktorch/codegen/*.cabal
-    hasktorch/libtorch-ffi/*.cabal
-    hasktorch/libtorch-ffi-helper/*.cabal
-    hasktorch/hasktorch/*.cabal
-    -- Main project
     ./*.cabal

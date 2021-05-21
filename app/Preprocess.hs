@@ -2,10 +2,12 @@ module Preprocess where
 
 import Data.String ( IsString(..) )
 import Data.Maybe ( fromMaybe )
-import Data.Foldable ( traverse_ )
+import Data.Foldable ( fold, for_, traverse_ )
+import qualified Data.Sequence as Seq
 import qualified Data.IntSet as IS
 import Data.IntMap ( IntMap )
 import qualified Data.IntMap.Strict as IM
+import qualified Data.Vector.Generic as GV
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
 import Data.Vector.Storable.ByteString
@@ -13,7 +15,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Control.Concurrent.Async.Pool
 import Control.Exception
-import Control.Monad ( when )
+import Control.Monad ( when, unless )
 import GHC.Generics ( Generic )
 import Data.Data ( Typeable )
 
@@ -24,19 +26,32 @@ import Foreign.Storable.Generic
 import PLY
 import PLY.Types
 import Data.Aeson
+import Util
 
 -- | Vector of dimension 3
 data Vec3 a = Vec3{
   vx :: !a, vy :: !a, vz :: !a
 } deriving (Show, Functor, Generic)
 instance Storable a => GStorable (Vec3 a)
+
 vecToV3 :: V.Vector a -> Vec3 a
 vecToV3 vec = Vec3 (vec V.! 0) (vec V.! 1) (vec V.! 2)
+v3ToList :: Vec3 a -> [a]
+v3ToList (Vec3 x y z) = [x, y, z]
+
 zipWithV :: (a -> a -> a) -> Vec3 a -> Vec3 a -> Vec3 a
 zipWithV fn (Vec3 x y z) (Vec3 x' y' z') = Vec3 (x `fn` x') (y `fn` y') (z `fn` z')
 
+flipX :: Num a => Vec3 a -> Vec3 a
+flipX (Vec3 x y z) = Vec3 (-x) y z
+
+rotateZ :: Floating a => a -> Vec3 a -> Vec3 a
+rotateZ angle (Vec3 x y z) = Vec3 (x*c - y*s) (x*s + y*c) z where
+  c = cos angle; s = sin angle
+
+
 data Vertex = Vertex{
-  vCoord :: !(Vec3 Float) -- ^ Coordinates, fit center to 0
+  vCoord :: !(Vec3 Float) -- ^ Coordinates, centroid ~ 0
   , vColor :: !(Vec3 Float) -- ^ RGB Color in [-1, 1]
   , vSemLabel :: !(Maybe Int32) -- ^ Semantic labels
 } deriving Show
@@ -56,7 +71,7 @@ instance FromJSON Aggregation where
 
 -- | Processed Vertex Data
 data ProcVert = ProcVert{
-  pCoord :: !(Vec3 Float)   -- ^ Coordinates, fit center to 0
+  pCoord :: !(Vec3 Float)   -- ^ Coordinates, centroid ~ 0
   , pColor :: !(Vec3 Float) -- ^ RGB Color in [-1, 1]
   , pSemLabel :: !Int32       -- ^ Semantic labels, missing = -1
   , pInsLabel :: !Int32       -- ^ Instance labels, missing = -1
@@ -69,9 +84,46 @@ writePVToFile p = B.writeFile p . vectorToByteString
 readPVFromFile :: FilePath -> IO ProcVerts
 readPVFromFile p = byteStringToVector <$> B.readFile p
 
-data DataContractException a = DataNotEqual String a a deriving (Show, Typeable)
+-- Extraction functions
+
+-- MAYBE also perform elastic distortion?
+
+-- |Apply noise to the vertex
+applyNoise :: Float -> ProcVert -> IO ProcVert
+applyNoise noise pv = do
+  rf <- randFlag
+  let refl = if rf then flipX else Prelude.id
+  ang <- rand noise -- TODO How much angle?
+  mov <- Vec3 <$> rand noise <*> rand noise <*> rand noise
+  return $ pv{ pCoord = refl . rotateZ ang . zipWithV (+) mov $ pCoord pv }
+  where
+    rand = undefined; randFlag = undefined
+
+-- | Selects appropriate region and gives the indices to fit in the number
+cropRegion :: Int -> ProcVerts -> IO (SV.Vector Int)
+cropRegion maxNum verts = do
+  undefined -- TODO
+
+-- TODO Much more convenient to deal with single huge scene
+
+-- | Groups vertex indices of each instance
+groupInstance :: ProcVerts -> SV.Vector Int -> IM.IntMap (Seq.Seq Int)
+groupInstance vs = IM.unionsWith (<>) . map single . SV.toList where
+  single ind
+    | lab == ignoreLabel = IM.empty
+    | otherwise = IM.singleton (fromIntegral lab) (pure ind)
+    where lab = pInsLabel $ vs SV.! ind
+
+
+-- |Data Contract Exception
+data DataContractException a =
+  DataNotEqual String a a
+  | DataNotUnique String [a]
+  deriving (Show, Typeable)
 instance (Show a, Typeable a) => Exception (DataContractException a)
 
+ignoreLabel :: Int32
+ignoreLabel = -1
 
 -- | Links the scannet dataset for use
 --
@@ -122,8 +174,8 @@ handleScannet path test specName scanName tarName = do
       let asPV Vertex{..} = ProcVert{
         pCoord = vCoord
         , pColor = vColor
-        , pSemLabel = -1
-        , pInsLabel = -1 }
+        , pSemLabel = ignoreLabel
+        , pInsLabel = ignoreLabel }
       (return $! SV.convert $ asPV <$> verts) <* printf "[%s] Parsed\n" scName
 
     parseTrain scName = do
@@ -139,29 +191,38 @@ handleScannet path test specName scanName tarName = do
 
       let numV = V.length verts
       let numS = V.length segs
-      when (numV /= numS) $ throw $
-        DataNotEqual (lenErr scName) numV numS
+      when (numV /= numS) $ throw
+        $ DataNotEqual (lenErr scName) numV numS
 
+      -- TODO Label check To discard unneeded object
+      let segToInst AggGroup{..} = IM.fromSet (const objectId) . IS.fromList $ SV.toList segments
       let seg_Insts = IM.unionsWith (dupInsErr scName) $ segToInst <$> fixedAggs
-      -- No instance for the segment: Denoted by -1
-      let getInst seg = fromMaybe (-1) $ seg_Insts IM.!? seg
-      -- TODO Check that points of the same instance attains the same semantic labels
+      -- No instance for the segment: Denoted by -1 (Perhaps -100?)
+      let getInst seg = fromMaybe ignoreLabel $ seg_Insts IM.!? seg
 
-      let asPV Vertex{..} seg = ProcVert{
-        pCoord = vCoord
-        , pColor = vColor
-        , pSemLabel = fromMaybe intErr vSemLabel
-        , pInsLabel = getInst . fromIntegral $ seg }
+      let semLabel = fromMaybe intErr . vSemLabel <$> verts
+      let insLabel = getInst . fromIntegral <$> segs
 
-      (return $! SV.convert $ V.zipWith asPV verts segs)
+      -- TODO Perform this faster
+      -- Check if points of each instance attains the same semantic label
+      let insToSems = V.zipWith IM.singleton
+            (fromIntegral <$> insLabel) (IS.singleton . fromIntegral <$> semLabel)
+      let insToSemDup = IM.filter ((> 1) . IS.size) $ IM.unionsWith (<>) insToSems
+      for_ (IM.lookupMin insToSemDup)
+        $ \(l, d) -> throw $ DataNotUnique (nonUniErr scName l) (IS.toAscList d)
+
+      let asPV v sem ins = ProcVert{
+        pCoord = vCoord v
+        , pColor = vColor v
+        , pSemLabel = sem
+        , pInsLabel = ins }
+
+      (return $! SV.convert $ V.zipWith3 asPV verts semLabel insLabel)
         <* printf "[%s] Parsed, length %d\n" scName numV
-
-    -- TODO Label check To discard unneeded object
-    segToInst AggGroup{..} =
-      IM.fromSet (const objectId) . IS.fromList $ SV.toList segments
 
     intErr = error "Internal error"
     lenErr scene = printf "[%s] Expected seg-length == #vert" scene
+    nonUniErr scene lab = printf "[%s] Non-unique semantic labels for instance %s" scene lab
     dupInsErr scene i j = error $ printf "[%s] Duplicate instance %d vs %d" scene i j
 
     filePt = "_vh_clean_2.ply"

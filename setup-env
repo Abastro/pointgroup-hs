@@ -3,3 +3,5 @@
 pushd hasktorch
 source setenv
 popd
+# temporary hack
+export LD_LIBRARY_PATH=/usr/local/cuda/nvvm/lib64:$LD_LIBRARY_PATH
