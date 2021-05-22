@@ -9,22 +9,12 @@ data PGInput = PGInput{
   pgColor :: Tensor -- ^ colors [N, nDim]
   , pgPos :: Tensor -- ^ positions [N, nDim]
 }
-catInputs :: [PGInput] -> PGInput
-catInputs l = PGInput{
-  pgColor = cat (Dim 0) $ pgColor <$> l
-  , pgPos = cat (Dim 0) $ pgPos <$> l
-}
 
 data PGGroundTruth = PGGroundTruth{
-  gtSem :: Tensor -- ^ semantic labels [N]
+  gtSem :: Vect -- ^ semantic labels [N]
+  , gtIL :: Vect -- ^ instance labels [N]
   , gtIns :: Instances  -- ^ instances
 }
-catGTs :: [PGGroundTruth] -> PGGroundTruth
-catGTs l = PGGroundTruth{
-  gtSem = cat (Dim 0) $ gtSem <$> l
-  , gtIns = undefined -- TODO
-}
-
 
 -- | PointGroup Losses
 data PGLoss = PGLoss {
@@ -44,7 +34,7 @@ data PGSpec s n = PGSpec{
   , nFeature :: Int
   , backSpec :: s
   , pgSpCfg :: PGCfg
-  , scFeature :: Int
+  , scFeature :: Int -- ^ feature # for hidden layer
   , scBackSpec :: s
 }
 data PointGroup n = PointGroup{
@@ -63,7 +53,7 @@ instance (BackSpec s, Randomizable s n) => Randomizable (PGSpec s n) (PointGroup
     <*> return pgSpCfg
     <*> sample (ScSpec nDim nFeature scBackSpec scFeature)
 
--- TODO Instead of Maybe, use a containment (Proxy or Identity) streamlining process
+-- LATER Instead of Maybe, use a containment (Proxy & Identity)
 -- | PointGroup. Pass Nothing for Ground Truth for tests
 pointGroup :: Backbone n => TrainSet -> PointGroup n
   -> Irreg PGInput -> Maybe PGGroundTruth -> (Instances, Maybe PGLoss)
@@ -85,16 +75,16 @@ pointGroup ts PointGroup{..} pInput gt = (res, losses) where
   predOff = offsetPred ts offBranch $ irregData ptFeat
   lossRegDir = do
     PGGroundTruth{..} <- gt
-    let m = undefined
+    let m = gtIL /=. asTensor ignoreLabel
     let pos = pgPos (irregData pInput)
-    let cent = centroid gtIns pos
+    let cent = indexSelect 0 gtIL $ centroid gtIns pos -- get corresopnding instance
     return (regLoss m predOff cent pos, dirLoss m predOff cent pos)
 
   -- Clustering
   clusterWith = cluster (clusterCfg pgCfg) . fmap (predSem, )
   insP = clusterWith pos
   insQ = clusterWith $ (predOff +) <$> pos
-  ins = undefined -- TODO Union two instances
+  ins = mergeInst insP insQ
 
   -- ScoreNet
   score = insScore ts scoreNet ins (irregData pos) (irregData ptFeat)

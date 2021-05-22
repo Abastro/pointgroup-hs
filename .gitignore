@@ -4,6 +4,7 @@ dist-newstyle/
 log/
 tmp/
 dataset/
+result/
 
 .vscode/
 

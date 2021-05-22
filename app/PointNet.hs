@@ -43,3 +43,5 @@ pointNet ts PointNet{..} inp = outp where
 
 instance Backbone PointNet where
   backbone ts pn = fmap $ pointNet ts pn
+instance BackSpec PNSpec where
+  modBackSpec _ = undefined -- TODO

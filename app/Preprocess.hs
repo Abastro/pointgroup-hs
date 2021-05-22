@@ -1,6 +1,8 @@
 module Preprocess where
 
 import Data.String ( IsString(..) )
+import GHC.Exts ( IsList(..) )
+import Data.List ( isSuffixOf )
 import Data.Maybe ( fromMaybe )
 import Data.Foldable ( fold, for_, traverse_ )
 import qualified Data.Sequence as Seq
@@ -13,33 +15,41 @@ import qualified Data.Vector.Storable as SV
 import Data.Vector.Storable.ByteString
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-import Control.Concurrent.Async.Pool
+import System.Random
+import Control.Concurrent.Async.Pool ( mapConcurrently, withTaskGroup )
 import Control.Exception
 import Control.Monad ( when, unless )
+import Control.Applicative ( Applicative(..) )
 import GHC.Generics ( Generic )
 import Data.Data ( Typeable )
+import qualified Torch as T
 
 import Text.Printf
-import System.FilePath
+import System.FilePath ( (</>) )
 import System.Directory
 import Foreign.Storable.Generic
 import PLY
 import PLY.Types
 import Data.Aeson
 import Util
+import Models
+import PointGroup
 
 -- | Vector of dimension 3
 data Vec3 a = Vec3{
   vx :: !a, vy :: !a, vz :: !a
-} deriving (Show, Functor, Generic)
+} deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
 instance Storable a => GStorable (Vec3 a)
+instance Applicative Vec3 where
+  pure t = Vec3 t t t
+  liftA2 = zipWithV
 
 vecToV3 :: V.Vector a -> Vec3 a
 vecToV3 vec = Vec3 (vec V.! 0) (vec V.! 1) (vec V.! 2)
 v3ToList :: Vec3 a -> [a]
 v3ToList (Vec3 x y z) = [x, y, z]
 
-zipWithV :: (a -> a -> a) -> Vec3 a -> Vec3 a -> Vec3 a
+zipWithV :: (a -> b -> c) -> Vec3 a -> Vec3 b -> Vec3 c
 zipWithV fn (Vec3 x y z) (Vec3 x' y' z') = Vec3 (x `fn` x') (y `fn` y') (z `fn` z')
 
 flipX :: Num a => Vec3 a -> Vec3 a
@@ -84,36 +94,6 @@ writePVToFile p = B.writeFile p . vectorToByteString
 readPVFromFile :: FilePath -> IO ProcVerts
 readPVFromFile p = byteStringToVector <$> B.readFile p
 
--- Extraction functions
-
--- MAYBE also perform elastic distortion?
-
--- |Apply noise to the vertex
-applyNoise :: Float -> ProcVert -> IO ProcVert
-applyNoise noise pv = do
-  rf <- randFlag
-  let refl = if rf then flipX else Prelude.id
-  ang <- rand noise -- TODO How much angle?
-  mov <- Vec3 <$> rand noise <*> rand noise <*> rand noise
-  return $ pv{ pCoord = refl . rotateZ ang . zipWithV (+) mov $ pCoord pv }
-  where
-    rand = undefined; randFlag = undefined
-
--- | Selects appropriate region and gives the indices to fit in the number
-cropRegion :: Int -> ProcVerts -> IO (SV.Vector Int)
-cropRegion maxNum verts = do
-  undefined -- TODO
-
--- TODO Much more convenient to deal with single huge scene
-
--- | Groups vertex indices of each instance
-groupInstance :: ProcVerts -> SV.Vector Int -> IM.IntMap (Seq.Seq Int)
-groupInstance vs = IM.unionsWith (<>) . map single . SV.toList where
-  single ind
-    | lab == ignoreLabel = IM.empty
-    | otherwise = IM.singleton (fromIntegral lab) (pure ind)
-    where lab = pInsLabel $ vs SV.! ind
-
 
 -- |Data Contract Exception
 data DataContractException a =
@@ -122,8 +102,8 @@ data DataContractException a =
   deriving (Show, Typeable)
 instance (Show a, Typeable a) => Exception (DataContractException a)
 
-ignoreLabel :: Int32
-ignoreLabel = -1
+sceneList :: FilePath -> String -> IO [String]
+sceneList srcP specName = lines <$> readFile (srcP </> specName)
 
 -- | Links the scannet dataset for use
 --
@@ -133,13 +113,13 @@ ignoreLabel = -1
 -- [@tarP@]: name of target directory to link
 -- [@split@]: name of the split directory in the target
 linkScannet :: FilePath -> String -> String -> FilePath -> String -> IO ()
-linkScannet srcP specName scanName tarP split = do
+linkScannet path specName scanName tarP split = do
   printf "Symlinking in %s for split %s..\n" tarP split
-  scenes <- lines <$> readFile (srcP </> specName)
+  scenes <- sceneList path specName
   traverse_ linkScene scenes
   where
     linkScene scName = do
-      scSrc <- canonicalizePath $ srcP </> scanName </> scName
+      scSrc <- canonicalizePath $ path </> scanName </> scName
       let scTar = tarP </> split
       lists <- listDirectory scSrc
       let link fn = do
@@ -156,7 +136,7 @@ linkScannet srcP specName scanName tarP split = do
 -- [@tarName@]: name of target directory to write to
 handleScannet :: FilePath -> Bool -> String -> String -> String -> IO ()
 handleScannet path test specName scanName tarName = do
-  scenes <- lines <$> readFile (path </> specName)
+  scenes <- sceneList path specName
   let parse = if test then parseTest else parseTrain
   let handleScene scene = parse scene >>= writeToFile scene
   withTaskGroup 16 $ \g -> () <$ mapConcurrently g handleScene scenes
@@ -249,3 +229,125 @@ readPlyVerts withLabel path = do
     coordOf vert = unsafeUnwrap @Float <$> V.slice 0 3 vert
     colorOf vert = unsafeUnwrap @Word8 <$> V.slice 3 3 vert
     labelOf vert = case vert V.! 7 of Sushort label -> label
+
+-- | Get data paths in the data directory
+getDataPaths :: FilePath -> String -> IO (V.Vector FilePath)
+getDataPaths path tarName = do
+  paths <- listDirectory (path </> tarName)
+  return . V.fromList $ filter (".dat" `isSuffixOf`) paths
+
+-- | Denotes config for the dataset
+data PGDataSet = PGDataSet{
+  nBatch :: Int     -- ^ Number of batches
+  , dataPath :: V.Vector FilePath -- ^ Data path
+  , withGT :: Bool  -- ^ Does the data contain GT?
+  , maxNum :: Int   -- ^ Max number allowed for a scene
+  , posScale :: Float -- ^ Scale of each position
+  , defScale :: Float -- ^ Default scale to go for when cropping, after scaling
+}
+instance T.Dataset IO PGDataSet Int (Irreg PGInput, Maybe PGGroundTruth) where
+  -- | Keys for the dataset
+  keys PGDataSet{..} = fromList [0 .. (length dataPath - 1) `div` nBatch]
+  -- | Gets item, merging the entries
+  getItem PGDataSet{..} index = do
+    let toFetch = toList $ V.take nBatch . V.drop (index * nBatch) $ dataPath
+    pr <- traverse process toFetch
+    let irreg = T.asTensor @[Int32] . cumsum $ fromIntegral . fst <$> pr
+    let inp = catInputs $ fst . snd <$> pr
+    let gt = catGTs irreg $ snd . snd <$> pr
+    pure (Irreg irreg inp, if withGT then Just gt else Nothing)
+    where
+      process path = do
+        verts <- readPVFromFile path
+        appNoise <- applyNoise
+        -- MAYBE also perform elastic distortion?
+        -- MAYBE jitter?
+        let noised = SV.map (applyScale posScale . appNoise) verts
+        let moved = SV.map (subOffset $ minVec noised) noised
+        sels <- cropRegion maxNum defScale moved
+        let entry i = moved SV.! i
+        let insts = groupInstance moved sels
+        let instList = IM.elems insts
+        let instLens = fromIntegral . length <$> instList
+        let selList = SV.toList sels
+        let pgInp = PGInput{  -- MAYBE This is too slow
+          pgPos = T.asTensor $ v3ToList . pCoord . entry <$> selList
+        , pgColor = T.asTensor $ v3ToList . pColor . entry <$> selList
+        }
+        let pgIns = Instances{
+          insPts = T.asTensor @[Int32] . toList $ fromIntegral <$> mconcat instList
+        , insBegin = Irreg undefined . T.asTensor @[Int32] $ instLens -- gives length here
+        } -- instance of single item, so undefined
+        let pgGT = PGGroundTruth{
+          gtSem = T.asTensor $ pSemLabel . entry <$> selList
+        , gtIL = T.asTensor $ packedLabels insts moved
+        , gtIns = pgIns
+        }
+        pure (SV.length sels, (pgInp, pgGT))
+
+      catBatch = T.cat (T.Dim 0)
+      catInputs inps = PGInput{
+        pgPos = catBatch $ pgPos <$> inps
+      , pgColor = catBatch $ pgColor <$> inps
+      }
+      catGTs irreg gts = PGGroundTruth{
+        gtSem = catBatch $ gtSem <$> gts
+      , gtIL = catBatch $ gtIL <$> gts
+      , gtIns = catInsts irreg $ gtIns <$> gts
+      }
+      catInsts irreg insts = Instances{
+        insPts = catBatch $ insPts <$> insts
+      , insBegin = Irreg (T.asTensor @[Int32] . cumsum $ bLens) begins
+      } where
+        begins = T.cumsum 0 T.Int32 . catBatch $ 0 : (irregData . insBegin <$> insts)
+        bLens = fromIntegral . T.size 0 . irregData . insBegin <$> insts
+
+      cumsum = scanl (+) 0 -- Lightweight cumulative sum
+      minVec :: ProcVerts -> Vec3 Float
+      minVec vs = minimum <$> sequenceA pos where pos = pCoord <$> SV.toList vs
+      maxVec :: ProcVerts -> Vec3 Float
+      maxVec vs = maximum <$> sequenceA pos where pos = pCoord <$> SV.toList vs
+
+      -- |Apply noise to the vertex
+      applyNoise :: IO (ProcVert -> ProcVert)
+      applyNoise = do
+        rf <- randomIO
+        let refl = if rf then flipX else Prelude.id
+        ang <- randomRIO (0.0, 2 * pi)
+        pure $ \pv -> pv{ pCoord = refl . rotateZ ang $ pCoord pv }
+
+      subOffset :: Vec3 Float -> ProcVert -> ProcVert
+      subOffset off pv = pv{ pCoord = zipWithV subtract off $ pCoord pv }
+      applyScale :: Float -> ProcVert -> ProcVert
+      applyScale sc pv = pv{ pCoord = (sc *) <$> pCoord pv }
+
+      -- | Selects appropriate region and gives the indices to fit in the number
+      cropRegion :: Int -> Float -> ProcVerts -> IO (SV.Vector Int)
+      cropRegion maxNum defScale verts =
+        if SV.length verts <= maxNum then pure indices else eval defScale
+        where
+          sceneSize = maxVec verts
+          indices = SV.enumFromN 0 (SV.length verts)
+          inRange low high x = low <= x && x < high
+          allInR ls hs xs = and $ inRange <$> ls <*> hs <*> xs
+          eval scale = do
+            let randUpto t = randomRIO (0.0, max 0.001 (t - scale))
+            ls <- traverse randUpto (maxVec verts)
+            let hs = (scale +) <$> ls
+            let cond = allInR ls hs . pCoord . (verts SV.!)
+            let inds = SV.filter cond indices
+            if SV.length inds <= maxNum then pure inds else eval (scale - 32)
+
+      -- | Groups vertex indices of each instance, label |-> point_indices
+      groupInstance :: ProcVerts -> SV.Vector Int -> IM.IntMap (Seq.Seq Int)
+      groupInstance vs = IM.unionsWith (<>) . map single . SV.toList where
+        single ind
+          | lab == ignoreLabel = IM.empty
+          | otherwise = IM.singleton (fromIntegral lab) (pure ind)
+          where lab = pInsLabel $ vs SV.! ind
+
+      -- | Infers packed labels from grouped instances (..)
+      packedLabels :: IM.IntMap a -> ProcVerts -> [Int32]
+      packedLabels insts vs = pack . pInsLabel <$> SV.toList vs where
+        packMap = IM.unions $ zipWith IM.singleton (IM.keys insts) [0..]
+        pack prev = fromMaybe ignoreLabel $ packMap IM.!? fromIntegral prev

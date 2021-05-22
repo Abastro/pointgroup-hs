@@ -9,18 +9,20 @@ import Data.Array.Accelerate (
   Acc, Array, Scalar, Vector, Matrix, Segments, Exp, Z(..), (:.)(..)
   )
 import qualified Data.Array.Accelerate as A
+import Data.Int
 
 -- | Train settings
 data TrainSet = TrainSet{
   train :: Bool
-  , momentum :: Double
-  , eps :: Double
+  , bnMomentum :: Double -- ^ For batch nomalization
+  , bnEps :: Double -- ^ For batch normalization
+  , learningRate :: LearningRate
 }
 
 -- | Batch normalization, done on the 1st dimension (right after batch)
 batchNormOn :: TrainSet -> BatchNorm -> Tensor -> Tensor
 batchNormOn TrainSet{..} layer =
-  batchNormForward layer train momentum eps
+  batchNormForward layer train bnMomentum bnEps
 
 -- | Batch normalization done on certain dimension <- Now redundant
 batchNormDim :: TrainSet -> Dim -> BatchNorm -> Tensor -> Tensor
@@ -59,13 +61,15 @@ applyMLP :: TrainSet -> MLP -> Tensor -> Tensor
 applyMLP ts MLP{..} inp = linear mlpLast $ foldl' (flip ($!)) inp (apply <$> mlpLayers)
   where apply (conv, bn) = relu . batchNormOn ts bn . linear conv
 
+ignoreLabel :: Int32
+ignoreLabel = -1
+
 -- | Denotes irregular batches
 data Irreg a = Irreg {
   batches :: Tensor -- ^ Denotes offset, [nBatch + 1]. Could be used several times
   , irregData :: a  -- ^ Denotes the data
 } deriving Functor
 
--- TODO accelerate platform does not seem to direct gen CUDA
 -- How to support with Tensor?
 -- Raw Torch. Max until .. does not work
 -- TODO Batch-aware maximum, eliminating irregularity. (values, args). Act 1st dimension

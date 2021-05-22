@@ -3,9 +3,10 @@ module Models where
 import Data.Function ((&))
 import GHC.Generics (Generic)
 import Torch as T
+import qualified Torch.Functional.Internal as I
 import Util
 
--- TODO Perhaps Use COO? Possibly slower though
+-- TODO Perhaps Use COO? Possibly slower
 
 -- * Conventions
 --
@@ -16,18 +17,25 @@ import Util
 -- nIns : number of instances
 -- sum x : sum of x over batches
 
--- | Denotes an instance segmantation. Batches included
+type Vect = Tensor
+
+-- | Denotes an instance segmantation
 data Instances = Instances{
-  insPts :: Tensor -- ^ Instance-sorted point indices, [sum nA]
-  , insBegin :: Irreg Tensor -- ^ Instance begin offset, pad last, [sum nIns + 1]
-  , insOfPt :: Irreg Tensor -- ^ Instance of a point, [N]
+  insPts :: Vect -- ^ Instance-sorted point indices, [sum nActive]
+  , insBegin :: Irreg Vect -- ^ Instance begin offset, pad last, [sum nIns + 1]
 }
 
-mkInstances :: Tensor -> Irreg Tensor -> Instances
-mkInstances insPts insBegin = undefined -- TODO
-insLOffset :: Instances -> Irreg Tensor
+mergeInst :: Instances -> Instances -> Instances
+mergeInst ins1 ins2 = Instances{
+  insPts = cat (Dim 0) [insPts ins1, insPts ins2]
+, insBegin = Irreg undefined $ cat (Dim 0) [begin1, begin2]
+} where -- TODO Batch-aware merge, also this pads one more (Calc which batch later?)
+  begin1 = irregData $ insBegin ins1
+  begin2 = irregData $ insBegin ins2
+
+insLOffset :: Instances -> Irreg Vect
 insLOffset Instances{..} = slice 0 0 (nIns-1) 1 <$> insBegin where nIns = size 0 (irregData insBegin)
-insROffset :: Instances -> Irreg Tensor
+insROffset :: Instances -> Irreg Vect
 insROffset Instances{..} = slice 0 1 nIns 1 <$> insBegin where nIns = size 0 (irregData insBegin)
 
 
@@ -45,11 +53,11 @@ semScore :: Semantics -> Tensor -> Tensor
 semScore Semantics{..} = linear semFc1
 
 -- | Semantic labels. Sc[N, nFeature] -> S[N]
-semLabel :: Tensor -> Tensor
+semLabel :: Tensor -> Vect
 semLabel = argmax (Dim 1) RemoveDim
 
 -- | Average semantic loss. GT[N] -> Sc[N, nFeature] -> Loss
-semLoss :: Tensor -> Tensor -> Tensor
+semLoss :: Vect -> Tensor -> Loss
 semLoss gt = nllLoss' gt . logSoftmax (Dim 1)
 
 
@@ -66,12 +74,12 @@ instance Randomizable OffSpec Offsets where
 offsetPred :: TrainSet -> Offsets -> Tensor -> Tensor
 offsetPred ts Offsets{..} = applyMLP ts offMlp
 
--- TODO This centroid could be inefficient
--- | Centroid of instance. p[N, nDim] -> c[N, nDim]
+-- MAYBE This centroid could be inefficient
+-- | Centroid of instance. p[N, nDim] -> c[sum nIns, nDim]
 centroid :: Instances -> Tensor -> Tensor
-centroid ins p = ind (irregData $ insOfPt ins) insCen where
+centroid ins pos = insCen where
   ind = indexSelect 0
-  ipos = ind (insPts ins) p -- instance positions in contiguous manner
+  ipos = ind (insPts ins) pos -- instance positions in contiguous manner
   sums = cat (Dim 1) [zerosLike (slice 0 0 1 1 ipos), cumsum 0 Float ipos]
 
   insLeft = irregData $ insLOffset ins; insRight = irregData $ insROffset ins
@@ -84,7 +92,7 @@ centroid ins p = ind (irregData $ insOfPt ins) insCen where
 -- m[N] -> o[N, nDim] -> c[N, nDim] -> p[N, nDim] -> Loss
 --
 -- m: mask, o: offset, c: centroid, p: position
-regLoss :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
+regLoss :: Vect -> Tensor -> Tensor -> Tensor -> Loss
 regLoss m o c p = out where
   diff = o `sub` (c `sub` p)
   out = m `mul` normDim 1.0 (Dim 1) RemoveDim diff
@@ -96,7 +104,7 @@ regLoss m o c p = out where
 -- m[N] -> o[N, nDim] -> c[N, nDim] -> p[N, nDim] -> Loss
 --
 -- m: mask, o: offset, c: centroid, p: position
-dirLoss :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
+dirLoss :: Vect -> Tensor -> Tensor -> Tensor -> Loss
 dirLoss m o c p = out where
   r = p `sub` c -- Negation of c-p
   s = normDim 2.0 (Dim 1) RemoveDim o `mul` normDim 2.0 (Dim 1) RemoveDim r
@@ -112,10 +120,11 @@ data Cluster = Cluster{
   , ptThreshold :: Int
 } deriving Generic
 instance Parameterized Cluster
--- | Clustering. No gradient. Irreg (sem[N], pos[N, nDim]) -> instances
-cluster :: Cluster -> Irreg (Tensor, Tensor) -> Instances
+-- | Clustering. No gradient.
+-- Irreg (sem[N], pos[N, nDim]) -> instances
+cluster :: Cluster -> Irreg (Vect, Tensor) -> Instances
 cluster cl semPos = undefined where
-  -- TODO write this without CUDA first
+  -- TODO write this without CUDA first?
 
 data ScSpec s n = ScSpec Int Int s Int -- ^ ScSpec nDim nFeat backSpec nHidden
 data ScoreNet n = ScoreNet{
@@ -129,7 +138,7 @@ instance (BackSpec s, Randomizable s n) => Randomizable (ScSpec s n) (ScoreNet n
 
 -- | Predicts score of each instance.
 -- ins -> pos[N, nDim] -> feat[N, nFeature] -> score[sum nIns]
-insScore :: Backbone n => TrainSet -> ScoreNet n -> Instances -> Tensor -> Tensor -> Tensor
+insScore :: Backbone n => TrainSet -> ScoreNet n -> Instances -> Tensor -> Tensor -> Vect
 insScore ts ScoreNet{..} Instances{..} pos feat = score where
   -- Concat & Sort along the instances
   preF = indexSelect 0 insPts $ cat (Dim 2) [feat, pos] -- [sum nA, dim + nFeat]
